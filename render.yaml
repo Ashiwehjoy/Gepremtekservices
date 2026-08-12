@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: gepremtek-services
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
