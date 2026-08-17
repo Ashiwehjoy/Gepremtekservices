@@ -1,113 +1,179 @@
-const express = require('express');
-const path = require('path');
-const fs = require('fs');
-const crypto = require('crypto');
+const express = require("express");
+const Database = require("better-sqlite3");
+const path = require("path");
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@gepremtekservices.com';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'ChangeThisPassword';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'development-secret-change-me';
-const dataDir = path.join(__dirname, 'data');
-const inquiriesFile = path.join(dataDir, 'inquiries.json');
 
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-if (!fs.existsSync(inquiriesFile)) fs.writeFileSync(inquiriesFile, '[]');
+const ADMIN_USER = process.env.ADMIN_USER || "admin";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "change-this-password";
 
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
 
-const services = [
-  { id: 1, title: 'Electrical Contracting', icon: '⚡', text: 'Professional electrical contracting for residential, commercial and industrial projects.' },
-  { id: 2, title: 'Electrical Installation', icon: '🔧', text: 'Safe, dependable electrical installation, wiring, equipment connection and commissioning.' },
-  { id: 3, title: 'Maintenance & Repairs', icon: '🛠️', text: 'Preventive maintenance, troubleshooting and repairs to keep electrical systems reliable.' },
-  { id: 4, title: 'Sales of Electrical Materials', icon: '📦', text: 'Supply of quality electrical materials and equipment for projects and maintenance work.' },
-  { id: 5, title: 'Solar & Power Solutions', icon: '☀️', text: 'Practical solar and backup-power solutions designed around your energy needs.' },
-  { id: 6, title: 'General Engineering Services', icon: '🏗️', text: 'Engineering support and technical services delivered with attention to quality and safety.' }
-];
+// Database
+const db = new Database("royal-klin.db");
 
-const projects = [
-  { title: 'Industrial Electrical Installation', category: 'Industrial', image: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?auto=format&fit=crop&w=1200&q=80' },
-  { title: 'Solar Power Solution', category: 'Solar', image: 'https://images.unsplash.com/photo-1509391366360-2e959784a276?auto=format&fit=crop&w=1200&q=80' },
-  { title: 'Electrical Maintenance', category: 'Maintenance', image: 'https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=1200&q=80' }
-];
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS bookings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    data TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Pending',
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )
+`).run();
 
-function readInquiries() {
-  try { return JSON.parse(fs.readFileSync(inquiriesFile, 'utf8')); }
-  catch { return []; }
-}
-function writeInquiries(items) {
-  fs.writeFileSync(inquiriesFile, JSON.stringify(items, null, 2));
-}
-function makeToken(email) {
-  const payload = Buffer.from(JSON.stringify({ email, exp: Date.now() + 8 * 60 * 60 * 1000 })).toString('base64url');
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-  return `${payload}.${sig}`;
-}
-function verifyToken(token) {
-  if (!token || !token.includes('.')) return false;
-  const [payload, sig] = token.split('.');
-  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('base64url');
-  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return false;
+// Serve website files
+app.use(express.static(path.join(__dirname)));
+
+// Customer booking
+app.post("/api/bookings", (req, res) => {
   try {
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString());
-    return data.email === ADMIN_EMAIL && data.exp > Date.now();
-  } catch { return false; }
-}
-function auth(req, res, next) {
-  const token = req.headers.authorization?.replace('Bearer ', '') || req.cookies?.session;
-  if (!verifyToken(token)) return res.status(401).json({ error: 'Unauthorized' });
+    const data = req.body || {};
+
+    const result = db.prepare(`
+      INSERT INTO bookings (data, status)
+      VALUES (?, 'Pending')
+    `).run(JSON.stringify(data));
+
+    res.json({
+      success: true,
+      id: result.lastInsertRowid,
+      message: "Booking saved successfully"
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      success: false,
+      error: "Unable to save booking"
+    });
+  }
+});
+
+// Basic authentication for admin
+function adminAuth(req, res, next) {
+  const header = req.headers.authorization || "";
+
+  if (!header.startsWith("Basic ")) {
+    res.set("WWW-Authenticate", 'Basic realm="Royal-Klin Admin"');
+    return res.status(401).send("Authentication required");
+  }
+
+  const encoded = header.slice(6);
+
+  let decoded;
+
+  try {
+    decoded = Buffer.from(encoded, "base64").toString("utf8");
+  } catch {
+    return res.status(401).send("Invalid authentication");
+  }
+
+  const separator = decoded.indexOf(":");
+
+  if (separator === -1) {
+    return res.status(401).send("Invalid authentication");
+  }
+
+  const user = decoded.slice(0, separator);
+  const password = decoded.slice(separator + 1);
+
+  if (user !== ADMIN_USER || password !== ADMIN_PASSWORD) {
+    res.set("WWW-Authenticate", 'Basic realm="Royal-Klin Admin"');
+    return res.status(401).send("Invalid username or password");
+  }
+
   next();
 }
 
-app.get('/api/health', (req, res) => res.json({ ok: true, service: 'Gepremtek Services API' }));
-app.get('/api/services', (req, res) => res.json(services));
-app.get('/api/projects', (req, res) => res.json(projects));
+// Get all bookings
+app.get("/api/admin/bookings", adminAuth, (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT id, data, status, created_at
+      FROM bookings
+      ORDER BY id DESC
+    `).all();
 
-app.post('/api/inquiries', (req, res) => {
-  const { name, email, phone, service, message } = req.body || {};
-  if (!name || !phone || !service || !message) return res.status(400).json({ error: 'Please complete all required fields.' });
-  if (String(message).length > 3000) return res.status(400).json({ error: 'Message is too long.' });
-  const items = readInquiries();
-  const inquiry = {
-    id: crypto.randomUUID(),
-    name: String(name).trim().slice(0, 100),
-    email: String(email || '').trim().slice(0, 150),
-    phone: String(phone).trim().slice(0, 40),
-    service: String(service).trim().slice(0, 120),
-    message: String(message).trim(),
-    createdAt: new Date().toISOString(),
-    status: 'new'
-  };
-  items.unshift(inquiry);
-  writeInquiries(items);
-  res.status(201).json({ message: 'Thank you. Your request has been received.', inquiryId: inquiry.id });
+    const bookings = rows.map(row => {
+      let data = {};
+
+      try {
+        data = JSON.parse(row.data);
+      } catch {
+        data = {};
+      }
+
+      return {
+        id: row.id,
+        ...data,
+        status: row.status,
+        created_at: row.created_at
+      };
+    });
+
+    res.json(bookings);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      error: "Unable to load bookings"
+    });
+  }
 });
 
-app.post('/api/admin/login', (req, res) => {
-  const { email, password } = req.body || {};
-  if (email !== ADMIN_EMAIL || password !== ADMIN_PASSWORD) return res.status(401).json({ error: 'Invalid admin credentials.' });
-  res.json({ token: makeToken(email), email });
+// Update booking status
+app.patch("/api/admin/bookings/:id", adminAuth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const status = req.body.status;
+
+    const allowedStatuses = [
+      "Pending",
+      "Processing",
+      "Ready",
+      "Delivered",
+      "Cancelled"
+    ];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        error: "Invalid booking status"
+      });
+    }
+
+    const result = db.prepare(`
+      UPDATE bookings
+      SET status = ?
+      WHERE id = ?
+    `).run(status, id);
+
+    if (result.changes === 0) {
+      return res.status(404).json({
+        error: "Booking not found"
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Booking status updated"
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({
+      error: "Unable to update booking"
+    });
+  }
 });
 
-app.get('/api/admin/inquiries', auth, (req, res) => res.json(readInquiries()));
-app.patch('/api/admin/inquiries/:id', auth, (req, res) => {
-  const items = readInquiries();
-  const item = items.find(x => x.id === req.params.id);
-  if (!item) return res.status(404).json({ error: 'Inquiry not found.' });
-  if (req.body.status) item.status = ['new', 'in-progress', 'closed'].includes(req.body.status) ? req.body.status : item.status;
-  writeInquiries(items);
-  res.json(item);
-});
-app.delete('/api/admin/inquiries/:id', auth, (req, res) => {
-  const items = readInquiries();
-  const next = items.filter(x => x.id !== req.params.id);
-  if (next.length === items.length) return res.status(404).json({ error: 'Inquiry not found.' });
-  writeInquiries(next);
-  res.json({ ok: true });
+// Health check
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "Royal-Klin Laundry"
+  });
 });
 
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-
-app.listen(PORT, () => console.log(`Gepremtek website running on port ${PORT}`));
+// Start server
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Royal-Klin server running on port ${PORT}`);
+});
